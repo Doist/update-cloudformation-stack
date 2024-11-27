@@ -18,7 +18,7 @@ inputs:
 
 runs:
   using: docker
-  image: docker://ghcr.io/artyom/update-cloudformation-stack:latest
+  image: docker://ghcr.io/doist/update-cloudformation-stack:latest
   args:
     - '-stack=${{ inputs.stack }}'
     - '-express=${{ inputs.express }}'
