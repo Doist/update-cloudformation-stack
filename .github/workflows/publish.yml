@@ -32,12 +32,12 @@ jobs:
             linux/arm64
             linux/amd64
           tags: |
-            ghcr.io/${{ github.repository }}:latest
+            ghcr.io/doist/update-cloudformation-stack:latest
           outputs: type=image,oci-mediatypes=true,compression=zstd,compression-level=6,force-compression=true
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - uses: actions/attest-build-provenance@v1
         with:
-          subject-name: ghcr.io/${{ github.repository }}
+          subject-name: ghcr.io/doist/update-cloudformation-stack
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
