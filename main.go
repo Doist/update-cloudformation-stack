@@ -37,6 +37,11 @@ func main() {
 	}
 }
 
+var (
+	defaultPollInterval = 15 * time.Second
+	defaultPollTimeout  = 10 * time.Minute
+)
+
 func run(ctx context.Context, stackName string, args []string) error {
 	if stackName == "" {
 		return errors.New("stack name must be set")
@@ -58,14 +63,13 @@ func run(ctx context.Context, stackName string, args []string) error {
 	}
 	svc := cloudformation.NewFromConfig(cfg)
 
-	desc, err := svc.DescribeStacks(ctx, &cloudformation.DescribeStacksInput{StackName: &stackName})
+	// Ensure the stack is stable before commencing update.
+	stack, err := waitForStableStack(ctx, svc, stackName, defaultPollInterval, defaultPollTimeout)
 	if err != nil {
-		return err
+		return fmt.Errorf("waiting for stable stack: %w", err)
 	}
-	if l := len(desc.Stacks); l != 1 {
-		return fmt.Errorf("DescribeStacks returned %d stacks, expected 1", l)
-	}
-	stack := desc.Stacks[0]
+	log.Printf("stack %s is ready, status: %s", stackName, stack.StackStatus)
+
 	var params []types.Parameter
 	for _, p := range stack.Parameters {
 		k := aws.ToString(p.ParameterKey)
@@ -203,4 +207,56 @@ func parseKvs(list []string) (map[string]string, error) {
 		out[k] = v
 	}
 	return out, nil
+}
+
+type stackDescriber interface {
+	DescribeStacks(ctx context.Context, input *cloudformation.DescribeStacksInput, optFns ...func(*cloudformation.Options)) (*cloudformation.DescribeStacksOutput, error)
+}
+
+func waitForStableStack(ctx context.Context, svc stackDescriber, stackName string, interval time.Duration, timeout time.Duration) (types.Stack, error) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+		case <-timer.C:
+			return types.Stack{}, fmt.Errorf("timed out waiting for stack %s to reach a stable state", stackName)
+		case <-ctx.Done():
+			return types.Stack{}, ctx.Err()
+		}
+
+		desc, err := svc.DescribeStacks(ctx, &cloudformation.DescribeStacksInput{StackName: &stackName})
+		if err != nil {
+			return types.Stack{}, err
+		}
+		if len(desc.Stacks) != 1 {
+			return types.Stack{}, fmt.Errorf("unexpected number of stacks returned: %d", len(desc.Stacks))
+		}
+		status := desc.Stacks[0].StackStatus
+		log.Printf("current stack status: %s", status)
+
+		switch status {
+		case types.StackStatusCreateComplete,
+			types.StackStatusUpdateComplete,
+			types.StackStatusRollbackComplete,
+			types.StackStatusUpdateRollbackComplete:
+			// Stable states.
+			log.Printf("stack %s is in a stable state: %s", stackName, status)
+			stack := desc.Stacks[0]
+			return stack, nil
+		case types.StackStatusUpdateInProgress,
+			types.StackStatusRollbackInProgress,
+			types.StackStatusUpdateRollbackInProgress,
+			types.StackStatusReviewInProgress:
+			// In-progress, wait longer.
+			log.Printf("stack %s is busy (state: %s), waiting...", stackName, status)
+			continue
+		default:
+			// Uh oh.
+			return types.Stack{}, fmt.Errorf("stack %s is in an unexpected or error state: %s", stackName, status)
+		}
+	}
 }
