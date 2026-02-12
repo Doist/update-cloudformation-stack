@@ -74,7 +74,7 @@ func run(ctx context.Context, stackName string, args []string) error {
 			delete(toReplace, k)
 			continue
 		}
-		params = append(params, types.Parameter{ParameterKey: &k, UsePreviousValue: ptr(true)})
+		params = append(params, types.Parameter{ParameterKey: &k, UsePreviousValue: new(true)})
 	}
 	if len(toReplace) != 0 {
 		return fmt.Errorf("stack has no parameters with these names: %s", strings.Join(slices.Sorted(maps.Keys(toReplace)), ", "))
@@ -94,7 +94,7 @@ func run(ctx context.Context, stackName string, args []string) error {
 	_, err = svc.UpdateStack(ctx, &cloudformation.UpdateStackInput{
 		StackName:           &stackName,
 		ClientRequestToken:  &token,
-		UsePreviousTemplate: ptr(true),
+		UsePreviousTemplate: new(true),
 		Parameters:          params,
 		Capabilities:        stack.Capabilities,
 		NotificationARNs:    stack.NotificationARNs,
@@ -207,7 +207,6 @@ func parseKvs(list []string) (map[string]string, error) {
 	return out, nil
 }
 
-func ptr[T any](v T) *T { return &v }
 func unptr[T any](v *T) T {
 	var zero T
 	if v != nil {
