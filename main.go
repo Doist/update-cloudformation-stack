@@ -196,8 +196,8 @@ func parseKvs(list []string) (map[string]string, error) {
 			return nil, fmt.Errorf("wrong parameter format, want key=value pair: %q", line)
 		}
 		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
-		if k == "" || v == "" {
-			return nil, fmt.Errorf("wrong parameter format, both key and value must be non-empty: %q", line)
+		if k == "" {
+			return nil, fmt.Errorf("wrong parameter format, key must be non-empty: %q", line)
 		}
 		if _, ok := out[k]; ok {
 			return nil, fmt.Errorf("duplicate key in parameters list: %q", k)

@@ -16,7 +16,7 @@ func Test_parseKvs(t *testing.T) {
 		{input: []string{"k=v", "", "k2=v", ""}, pairsParsed: 2},
 		{input: []string{"k=v", "k2=v", "k=v"}, wantErr: true},
 		{input: []string{"k=v", "junk"}, wantErr: true},
-		{input: []string{"k= ", "k2=v"}, wantErr: true},
+		{input: []string{"k= ", "k2=v"}, pairsParsed: 2},
 	} {
 		got, err := parseKvs(tc.input)
 		if tc.wantErr != (err != nil) {
