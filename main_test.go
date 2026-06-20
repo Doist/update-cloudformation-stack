@@ -27,3 +27,27 @@ func Test_parseKvs(t *testing.T) {
 		}
 	}
 }
+
+func Test_hasTransform(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want bool
+	}{
+		{name: "yaml with transform", body: "AWSTemplateFormatVersion: '2010-09-09'\nTransform: AWS::Serverless-2016-10-31\nResources: {}\n", want: true},
+		{name: "yaml transform list", body: "Transform:\n  - AWS::Serverless-2016-10-31\nResources: {}\n", want: true},
+		{name: "yaml no transform", body: "AWSTemplateFormatVersion: '2010-09-09'\nResources:\n  Q:\n    Type: AWS::SQS::Queue\n", want: false},
+		{name: "yaml nested transform key", body: "Resources:\n  Transform: something\n", want: false},
+		{name: "json with transform", body: `{"Transform": "AWS::Serverless-2016-10-31", "Resources": {}}`, want: true},
+		{name: "json transform list", body: `{"Transform": ["AWS::Serverless-2016-10-31"], "Resources": {}}`, want: true},
+		{name: "json no transform", body: `{"Resources": {}}`, want: false},
+		{name: "json null transform", body: `{"Transform": null, "Resources": {}}`, want: false},
+		{name: "empty", body: "", want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := hasTransform(tc.body); got != tc.want {
+				t.Errorf("hasTransform() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

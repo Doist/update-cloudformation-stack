@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -66,6 +67,18 @@ func run(ctx context.Context, stackName string, args []string) error {
 		return fmt.Errorf("DescribeStacks returned %d stacks, expected 1", l)
 	}
 	stack := desc.Stacks[0]
+
+	tmpl, err := svc.GetTemplate(ctx, &cloudformation.GetTemplateInput{
+		StackName:     &stackName,
+		TemplateStage: types.TemplateStageOriginal,
+	})
+	if err != nil {
+		return err
+	}
+	if hasTransform(unptr(tmpl.TemplateBody)) {
+		return errors.New("stack relies on template transformations (non-empty Transform section); parameters-only updates are not supported, see README")
+	}
+
 	var params []types.Parameter
 	for _, p := range stack.Parameters {
 		k := unptr(p.ParameterKey)
@@ -205,6 +218,35 @@ func parseKvs(list []string) (map[string]string, error) {
 		out[k] = v
 	}
 	return out, nil
+}
+
+// hasTransform reports whether a CloudFormation template body declares a
+// non-empty top-level Transform section. Templates may be JSON or YAML; YAML
+// short-form intrinsics (!Ref, !GetAtt, …) make full parsing impractical, so the
+// YAML path only looks for a top-level Transform key.
+func hasTransform(body string) bool {
+	trimmed := strings.TrimSpace(body)
+	if strings.HasPrefix(trimmed, "{") {
+		var doc struct {
+			Transform json.RawMessage `json:"Transform"`
+		}
+		if json.Unmarshal([]byte(trimmed), &doc) != nil {
+			return false // let UpdateStack surface a malformed template
+		}
+		switch strings.TrimSpace(string(doc.Transform)) {
+		case "", "null", "[]", `""`:
+			return false
+		default:
+			return true
+		}
+	}
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if strings.HasPrefix(line, "Transform:") || strings.HasPrefix(line, "Transform ") {
+			return true
+		}
+	}
+	return false
 }
 
 func unptr[T any](v *T) T {

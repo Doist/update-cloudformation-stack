@@ -34,6 +34,7 @@ This action uses the AWS SDK default credential provider chain. Configure AWS cr
 This action requires the following permissions:
 
 - cloudformation:DescribeStacks
+- cloudformation:GetTemplate
 - cloudformation:UpdateStack
 - cloudformation:DescribeStackEvents
 
@@ -62,6 +63,6 @@ The action will monitor stack update progress and fail if update fails.
 This action doesn't work for stacks that rely on template transformations
 (stack template has non-empty [“Transform” section][transform]).
 
-On such stacks UpdateStack API call does not recognize parameters-only changes and the action reports there's nothing to update.
+On such stacks the UpdateStack API call does not recognize parameters-only changes. The action detects a non-empty Transform section up front and fails with a clear error instead of silently reporting there's nothing to update.
 
 [transform]: https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/transform-section-structure.html
