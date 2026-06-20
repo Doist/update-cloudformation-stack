@@ -1,15 +1,16 @@
 package main
 
 import (
-	"cmp"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"maps"
+	"net/url"
 	"os"
 	"slices"
 	"strings"
@@ -105,7 +106,6 @@ func run(ctx context.Context, stackName string, args []string) error {
 	log.Print("polling for stack updates until it's ready, this may take a while")
 	oldEventsCutoff := time.Now().Add(-time.Hour)
 	ticker := time.NewTicker(20 * time.Second)
-	var likelyRootCause error
 	defer ticker.Stop()
 	for {
 		select {
@@ -113,6 +113,11 @@ func run(ctx context.Context, stackName string, args []string) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		}
+		// Re-scan events on every tick. The stack-level terminal event is the
+		// newest one, but the resource failures that caused it are older, so on
+		// failure we keep scanning the page to collect them all before reporting.
+		failures := make(map[string]failedEvent)
+		var terminal types.ResourceStatus
 		p := cloudformation.NewDescribeStackEventsPaginator(svc, &cloudformation.DescribeStackEventsInput{StackName: &stackName})
 	scanEvents:
 		for p.HasMorePages() {
@@ -127,24 +132,111 @@ func run(ctx context.Context, stackName string, args []string) error {
 				if evt.ClientRequestToken == nil || *evt.ClientRequestToken != token {
 					continue
 				}
-				if likelyRootCause == nil && evt.ResourceStatus == types.ResourceStatusUpdateFailed && unptr(evt.ResourceStatusReason) != "Resource update cancelled" {
-					likelyRootCause = fmt.Errorf("%s %v: %s", unptr(evt.LogicalResourceId), evt.ResourceStatus, unptr(evt.ResourceStatusReason))
-					debugf("likely root cause: %v", likelyRootCause)
-				}
 				debugf("%s\t%s\t%v", unptr(evt.ResourceType), unptr(evt.LogicalResourceId), evt.ResourceStatus)
 				if unptr(evt.LogicalResourceId) == stackName && unptr(evt.ResourceType) == "AWS::CloudFormation::Stack" {
 					switch evt.ResourceStatus {
-					case types.ResourceStatusUpdateRollbackComplete,
-						types.ResourceStatusRollbackFailed:
-						return cmp.Or(likelyRootCause, fmt.Errorf("%v, see AWS CloudFormation Console for more details", evt.ResourceStatus))
 					case types.ResourceStatusUpdateComplete:
 						return nil
+					case types.ResourceStatusUpdateRollbackComplete,
+						types.ResourceStatusRollbackFailed:
+						terminal = evt.ResourceStatus
 					}
+					continue
+				}
+				if isFailure(evt.ResourceStatus, unptr(evt.ResourceStatusReason)) {
+					fe := failedEvent{
+						logicalID: unptr(evt.LogicalResourceId),
+						resType:   unptr(evt.ResourceType),
+						status:    evt.ResourceStatus,
+						reason:    unptr(evt.ResourceStatusReason),
+						timestamp: unptr(evt.Timestamp),
+					}
+					failures[fe.logicalID+"\x00"+fe.timestamp.String()] = fe
 				}
 			}
 		}
+		if terminal != "" {
+			return reportFailure(cfg.Region, unptr(stack.StackId), terminal, sortedFailures(failures))
+		}
 	}
 }
+
+// failedEvent is a resource-level stack event that reports a failure.
+type failedEvent struct {
+	logicalID string
+	resType   string
+	status    types.ResourceStatus
+	reason    string
+	timestamp time.Time
+}
+
+// isFailure reports whether a resource-level event is a genuine failure, as
+// opposed to a cancellation cascading from another resource's failure.
+func isFailure(status types.ResourceStatus, reason string) bool {
+	if !strings.HasSuffix(string(status), "_FAILED") {
+		return false
+	}
+	return !strings.Contains(strings.ToLower(reason), "cancelled")
+}
+
+func sortedFailures(m map[string]failedEvent) []failedEvent {
+	out := slices.Collect(maps.Values(m))
+	slices.SortFunc(out, func(a, b failedEvent) int { return a.timestamp.Compare(b.timestamp) })
+	return out
+}
+
+// reportFailure writes a human-readable failure report — a GitHub step summary
+// table plus per-resource error annotations — and returns the most likely root
+// cause as an error. The earliest failure is the root cause; later ones usually
+// cascade from it.
+func reportFailure(region, stackID string, terminal types.ResourceStatus, failures []failedEvent) error {
+	consoleURL := eventsConsoleURL(region, stackID)
+	if path := os.Getenv("GITHUB_STEP_SUMMARY"); path != "" {
+		if err := writeStepSummary(path, consoleURL, terminal, failures); err != nil {
+			debugf("cannot write step summary: %v", err)
+		}
+	}
+	if len(failures) == 0 {
+		return fmt.Errorf("%s, see stack events: %s", terminal, consoleURL)
+	}
+	for _, e := range failures[1:] {
+		log.Printf("%s%s (%s) %s: %s", githubErrPrefix, e.logicalID, e.resType, e.status, oneLine(e.reason))
+	}
+	root := failures[0]
+	return fmt.Errorf("%s (%s) %s: %s — see stack events: %s", root.logicalID, root.resType, root.status, oneLine(root.reason), consoleURL)
+}
+
+func eventsConsoleURL(region, stackID string) string {
+	return fmt.Sprintf("https://%[1]s.console.aws.amazon.com/cloudformation/home?region=%[1]s#/stacks/events?stackId=%s",
+		region, url.QueryEscape(stackID))
+}
+
+func writeStepSummary(path, consoleURL string, terminal types.ResourceStatus, failures []failedEvent) error {
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	var b strings.Builder
+	fmt.Fprintf(&b, "## ❌ CloudFormation deployment failed (%s)\n\n", terminal)
+	if len(failures) != 0 {
+		b.WriteString("| Time (UTC) | Resource | Type | Status | Reason |\n| --- | --- | --- | --- | --- |\n")
+		for _, e := range failures {
+			fmt.Fprintf(&b, "| %s | %s | %s | %s | %s |\n", e.timestamp.UTC().Format("15:04:05"), e.logicalID, e.resType, e.status, mdCell(e.reason))
+		}
+		b.WriteString("\n")
+	}
+	fmt.Fprintf(&b, "[View stack events in the AWS Console](%s)\n", consoleURL)
+	_, err = io.WriteString(f, b.String())
+	return err
+}
+
+// oneLine collapses runs of whitespace (including newlines) into single spaces
+// so a reason renders on a single log line or table cell.
+func oneLine(s string) string { return strings.Join(strings.Fields(s), " ") }
+
+// mdCell makes a reason safe to embed in a Markdown table cell.
+func mdCell(s string) string { return strings.ReplaceAll(oneLine(s), "|", "\\|") }
 
 func newToken() string {
 	b := make([]byte, 20)
