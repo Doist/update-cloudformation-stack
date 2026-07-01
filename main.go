@@ -25,8 +25,10 @@ func main() {
 	log.SetFlags(0)
 	var stackName string
 	flag.StringVar(&stackName, "stack", stackName, "name of the CloudFormation stack to update")
+	var express bool
+	flag.BoolVar(&express, "express", express, "CloudFormation express mode")
 	flag.Parse()
-	if err := run(context.Background(), stackName, flag.Args()); err != nil {
+	if err := run(context.Background(), express, stackName, flag.Args()); err != nil {
 		var ae smithy.APIError
 		if errors.As(err, &ae) && ae.ErrorCode() == "ValidationError" && ae.ErrorMessage() == "No updates are to be performed." {
 			debugf("error: %v", err)
@@ -37,7 +39,7 @@ func main() {
 	}
 }
 
-func run(ctx context.Context, stackName string, args []string) error {
+func run(ctx context.Context, express bool, stackName string, args []string) error {
 	if stackName == "" {
 		return errors.New("stack name must be set")
 	}
@@ -90,6 +92,10 @@ func run(ctx context.Context, stackName string, args []string) error {
 		}
 	}
 
+	var depconf *types.DeploymentConfig
+	if express {
+		depconf = &types.DeploymentConfig{Mode: types.DeploymentConfigModeExpress}
+	}
 	token := newToken()
 	_, err = svc.UpdateStack(ctx, &cloudformation.UpdateStackInput{
 		StackName:           &stackName,
@@ -98,6 +104,7 @@ func run(ctx context.Context, stackName string, args []string) error {
 		Parameters:          params,
 		Capabilities:        stack.Capabilities,
 		NotificationARNs:    stack.NotificationARNs,
+		DeploymentConfig:    depconf,
 	})
 	if err != nil {
 		return err

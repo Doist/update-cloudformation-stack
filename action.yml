@@ -11,9 +11,14 @@ inputs:
       Newline-separated parameters to change in the Name=Value format.
       Stack parameters not set here would retain their existing values.
     required: true
+  express:
+    description: Whether to use CloudFormation express mode
+    required: false
+    default: "false"
 
 runs:
   using: docker
   image: docker://ghcr.io/artyom/update-cloudformation-stack:latest
   args:
     - '-stack=${{ inputs.stack }}'
+    - '-express=${{ inputs.express }}'

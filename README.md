@@ -17,6 +17,7 @@ This GitHub Action updates existing CloudFormation stack by changing some of its
 
 - `stack` - name of the CloudFormation stack to update
 - `parameters` - pairs of parameters in the Name=Value format, each pair on a separate line
+- `express` - optional, set to true to enable [CloudFormation express mode](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/cloudformation-express-mode.html)
 
 ## AWS Credentials
 
