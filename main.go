@@ -94,7 +94,7 @@ func run(ctx context.Context, express bool, stackName string, args []string) err
 
 	var depconf *types.DeploymentConfig
 	if express {
-		depconf = &types.DeploymentConfig{Mode: types.DeploymentConfigModeExpress}
+		depconf = &types.DeploymentConfig{Mode: types.DeploymentConfigModeExpress, DisableRollback: new(false)}
 	}
 	token := newToken()
 	_, err = svc.UpdateStack(ctx, &cloudformation.UpdateStackInput{
