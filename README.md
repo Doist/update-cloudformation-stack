@@ -58,6 +58,17 @@ jobs:
 
 The action will monitor stack update progress and fail if update fails.
 
+## Failure reporting
+
+When a stack update fails and rolls back, the action reports why instead of
+leaving you to dig through the AWS Console:
+
+- It scans the stack events for this specific update and reports the most likely
+  root cause (the earliest failed resource) as the step's error message.
+- Running under GitHub Actions, it writes a summary table of all failed
+  resources (logical ID, type, status, reason) to the job summary, with a
+  deep link to the stack's events in the AWS Console.
+
 ## Known Limitations
 
 This action doesn't work for stacks that rely on template transformations
