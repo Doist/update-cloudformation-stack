@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -33,55 +35,47 @@ func Test_parseKvs(t *testing.T) {
 	}
 }
 
-func Test_isFailure(t *testing.T) {
-	for _, tc := range []struct {
-		status types.ResourceStatus
-		reason string
-		want   bool
-	}{
-		{status: types.ResourceStatusUpdateFailed, reason: "S3 bucket already exists", want: true},
-		{status: types.ResourceStatusCreateFailed, reason: "Invalid value", want: true},
-		{status: "DELETE_FAILED", reason: "resource in use", want: true},
-		{status: types.ResourceStatusUpdateFailed, reason: "Resource update cancelled", want: false},
-		{status: types.ResourceStatusUpdateFailed, reason: "Resource creation Cancelled", want: false},
-		{status: types.ResourceStatusUpdateComplete, reason: "", want: false},
-		{status: types.ResourceStatusUpdateInProgress, reason: "", want: false},
-	} {
-		if got := isFailure(tc.status, tc.reason); got != tc.want {
-			t.Errorf("isFailure(%q, %q) = %v, want %v", tc.status, tc.reason, got, tc.want)
-		}
+func Test_updateFailed(t *testing.T) {
+	const link = "https://console.aws.amazon.com/go/view?arn=arn%3Aaws%3Acloudformation%3Aeu-west-1%3A1%3Astack%2Ffoo%2Fabc"
+	t0 := time.Date(2026, 9, 19, 10, 0, 0, 0, time.UTC)
+	e := &updateFailed{
+		stackARN: "arn:aws:cloudformation:eu-west-1:1:stack/foo/abc",
+		status:   types.ResourceStatusUpdateRollbackComplete,
+		failures: []failedEvent{
+			{logicalID: "Bucket", resType: "AWS::S3::Bucket", status: types.ResourceStatusUpdateFailed, reason: "bucket | already\nexists", timestamp: t0},
+			{logicalID: "Role", resType: "AWS::IAM::Role", status: types.ResourceStatusUpdateFailed, timestamp: t0.Add(time.Minute)},
+		},
 	}
-}
+	if got, want := e.Error(), "Bucket (AWS::S3::Bucket) UPDATE_FAILED: bucket | already exists, see stack events: "+link; got != want {
+		t.Errorf("Error() =\n  %q\nwant\n  %q", got, want)
+	}
 
-func Test_sortedFailures(t *testing.T) {
-	t0 := time.Unix(1000, 0)
-	m := map[string]failedEvent{
-		"b": {logicalID: "B", timestamp: t0.Add(2 * time.Minute)},
-		"a": {logicalID: "A", timestamp: t0},
-		"c": {logicalID: "C", timestamp: t0.Add(time.Minute)},
+	name := filepath.Join(t.TempDir(), "summary.md")
+	if err := e.writeSummary(name); err != nil {
+		t.Fatal(err)
 	}
-	got := sortedFailures(m)
-	want := []string{"A", "C", "B"}
-	if len(got) != len(want) {
-		t.Fatalf("got %d events, want %d", len(got), len(want))
+	got, err := os.ReadFile(name)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for i, id := range want {
-		if got[i].logicalID != id {
-			t.Errorf("position %d: got %q, want %q (root cause must be earliest)", i, got[i].logicalID, id)
-		}
+	want := "## ❌ CloudFormation deployment failed (UPDATE_ROLLBACK_COMPLETE)\n\n" +
+		"| Time (UTC) | Resource | Type | Status | Reason |\n" +
+		"| --- | --- | --- | --- | --- |\n" +
+		"| 10:00:00 | Bucket | AWS::S3::Bucket | UPDATE_FAILED | bucket \\| already exists |\n" +
+		"| 10:01:00 | Role | AWS::IAM::Role | UPDATE_FAILED |  |\n\n" +
+		"[View stack events in the AWS Console](" + link + ")\n"
+	if string(got) != want {
+		t.Errorf("writeSummary() wrote\n%s\nwant\n%s", got, want)
+	}
+
+	e.failures = nil
+	if got, want := e.Error(), "UPDATE_ROLLBACK_COMPLETE, see stack events: "+link; got != want {
+		t.Errorf("Error() with no failures =\n  %q\nwant\n  %q", got, want)
 	}
 }
 
 func Test_mdCell(t *testing.T) {
-	if got, want := mdCell("a | b\nc"), `a \| b c`; got != want {
+	if got, want := mdCell("  a | b\n\tc "), `a \| b c`; got != want {
 		t.Errorf("mdCell() = %q, want %q", got, want)
-	}
-}
-
-func Test_eventsConsoleURL(t *testing.T) {
-	got := eventsConsoleURL("eu-west-1", "arn:aws:cloudformation:eu-west-1:1:stack/foo/abc")
-	want := "https://eu-west-1.console.aws.amazon.com/cloudformation/home?region=eu-west-1#/stacks/events?stackId=arn%3Aaws%3Acloudformation%3Aeu-west-1%3A1%3Astack%2Ffoo%2Fabc"
-	if got != want {
-		t.Errorf("eventsConsoleURL() =\n  %q\nwant\n  %q", got, want)
 	}
 }
