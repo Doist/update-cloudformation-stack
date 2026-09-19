@@ -1,13 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"log"
 	"maps"
 	"net/url"
@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/cloudformation"
@@ -33,6 +34,12 @@ func main() {
 			debugf("error: %v", err)
 			log.Print(githubWarnPrefix, "nothing to update")
 			return
+		}
+		var uf *updateFailed
+		if name := os.Getenv("GITHUB_STEP_SUMMARY"); name != "" && errors.As(err, &uf) {
+			if err := uf.writeSummary(name); err != nil {
+				debugf("cannot write step summary: %v", err)
+			}
 		}
 		log.Fatal(githubErrPrefix, err)
 	}
@@ -113,11 +120,11 @@ func run(ctx context.Context, stackName string, args []string) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		}
-		// Re-scan events on every tick. The stack-level terminal event is the
-		// newest one, but the resource failures that caused it are older, so on
-		// failure we keep scanning the page to collect them all before reporting.
-		failures := make(map[string]failedEvent)
+		// Events come newest first. On failure the stack-level terminal event
+		// shows up before the resource failures that caused it, so keep
+		// scanning to collect them all before reporting.
 		var terminal types.ResourceStatus
+		var failures []failedEvent // newest first
 		p := cloudformation.NewDescribeStackEventsPaginator(svc, &cloudformation.DescribeStackEventsInput{StackName: &stackName})
 	scanEvents:
 		for p.HasMorePages() {
@@ -138,30 +145,43 @@ func run(ctx context.Context, stackName string, args []string) error {
 					case types.ResourceStatusUpdateComplete:
 						return nil
 					case types.ResourceStatusUpdateRollbackComplete,
+						types.ResourceStatusUpdateRollbackFailed,
 						types.ResourceStatusRollbackFailed:
 						terminal = evt.ResourceStatus
+					case types.ResourceStatusUpdateInProgress:
+						// the oldest event of this update, nothing to see past it
+						break scanEvents
 					}
-					continue
 				}
-				if isFailure(evt.ResourceStatus, unptr(evt.ResourceStatusReason)) {
-					fe := failedEvent{
+				reason := unptr(evt.ResourceStatusReason)
+				if strings.HasSuffix(string(evt.ResourceStatus), "_FAILED") && !strings.Contains(strings.ToLower(reason), "cancelled") {
+					failures = append(failures, failedEvent{
 						logicalID: unptr(evt.LogicalResourceId),
 						resType:   unptr(evt.ResourceType),
 						status:    evt.ResourceStatus,
-						reason:    unptr(evt.ResourceStatusReason),
+						reason:    reason,
 						timestamp: unptr(evt.Timestamp),
-					}
-					failures[fe.logicalID+"\x00"+fe.timestamp.String()] = fe
+					})
 				}
 			}
 		}
 		if terminal != "" {
-			return reportFailure(cfg.Region, unptr(stack.StackId), terminal, sortedFailures(failures))
+			slices.Reverse(failures)
+			return &updateFailed{stackARN: unptr(stack.StackId), status: terminal, failures: failures}
 		}
 	}
 }
 
-// failedEvent is a resource-level stack event that reports a failure.
+// updateFailed is the error returned when a stack update rolls back. It
+// carries the failures seen during the update, oldest first: the first one is
+// the likely root cause, later ones usually cascade from it.
+type updateFailed struct {
+	stackARN string
+	status   types.ResourceStatus
+	failures []failedEvent
+}
+
+// failedEvent is a stack event that reports a failure.
 type failedEvent struct {
 	logicalID string
 	resType   string
@@ -170,70 +190,55 @@ type failedEvent struct {
 	timestamp time.Time
 }
 
-// isFailure reports whether a resource-level event is a genuine failure, as
-// opposed to a cancellation cascading from another resource's failure.
-func isFailure(status types.ResourceStatus, reason string) bool {
-	if !strings.HasSuffix(string(status), "_FAILED") {
-		return false
+func (e *updateFailed) Error() string {
+	if len(e.failures) == 0 {
+		return fmt.Sprintf("%s, see stack events: %s", e.status, e.consoleURL())
 	}
-	return !strings.Contains(strings.ToLower(reason), "cancelled")
+	root := e.failures[0]
+	s := fmt.Sprintf("%s (%s) %s", root.logicalID, root.resType, root.status)
+	if reason := oneLine(root.reason); reason != "" {
+		s += ": " + reason
+	}
+	return s + ", see stack events: " + e.consoleURL()
 }
 
-func sortedFailures(m map[string]failedEvent) []failedEvent {
-	out := slices.Collect(maps.Values(m))
-	slices.SortFunc(out, func(a, b failedEvent) int { return a.timestamp.Compare(b.timestamp) })
-	return out
-}
-
-// reportFailure writes a human-readable failure report — a GitHub step summary
-// table plus per-resource error annotations — and returns the most likely root
-// cause as an error. The earliest failure is the root cause; later ones usually
-// cascade from it.
-func reportFailure(region, stackID string, terminal types.ResourceStatus, failures []failedEvent) error {
-	consoleURL := eventsConsoleURL(region, stackID)
-	if path := os.Getenv("GITHUB_STEP_SUMMARY"); path != "" {
-		if err := writeStepSummary(path, consoleURL, terminal, failures); err != nil {
-			debugf("cannot write step summary: %v", err)
-		}
-	}
-	if len(failures) == 0 {
-		return fmt.Errorf("%s, see stack events: %s", terminal, consoleURL)
-	}
-	for _, e := range failures[1:] {
-		log.Printf("%s%s (%s) %s: %s", githubErrPrefix, e.logicalID, e.resType, e.status, oneLine(e.reason))
-	}
-	root := failures[0]
-	return fmt.Errorf("%s (%s) %s: %s — see stack events: %s", root.logicalID, root.resType, root.status, oneLine(root.reason), consoleURL)
-}
-
-func eventsConsoleURL(region, stackID string) string {
-	return fmt.Sprintf("https://%[1]s.console.aws.amazon.com/cloudformation/home?region=%[1]s#/stacks/events?stackId=%s",
-		region, url.QueryEscape(stackID))
-}
-
-func writeStepSummary(path, consoleURL string, terminal types.ResourceStatus, failures []failedEvent) error {
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	var b strings.Builder
-	fmt.Fprintf(&b, "## ❌ CloudFormation deployment failed (%s)\n\n", terminal)
-	if len(failures) != 0 {
+// writeSummary writes a Markdown report of all failures to the named file,
+// meant for the GitHub Actions job summary.
+func (e *updateFailed) writeSummary(filename string) error {
+	var b bytes.Buffer
+	fmt.Fprintf(&b, "## ❌ CloudFormation deployment failed (%s)\n\n", e.status)
+	if len(e.failures) != 0 {
 		b.WriteString("| Time (UTC) | Resource | Type | Status | Reason |\n| --- | --- | --- | --- | --- |\n")
-		for _, e := range failures {
-			fmt.Fprintf(&b, "| %s | %s | %s | %s | %s |\n", e.timestamp.UTC().Format("15:04:05"), e.logicalID, e.resType, e.status, mdCell(e.reason))
+		for _, f := range e.failures {
+			fmt.Fprintf(&b, "| %s | %s | %s | %s | %s |\n", f.timestamp.UTC().Format("15:04:05"), f.logicalID, f.resType, f.status, mdCell(f.reason))
 		}
 		b.WriteString("\n")
 	}
-	fmt.Fprintf(&b, "[View stack events in the AWS Console](%s)\n", consoleURL)
-	_, err = io.WriteString(f, b.String())
-	return err
+	fmt.Fprintf(&b, "[View stack events in the AWS Console](%s)\n", e.consoleURL())
+	return os.WriteFile(filename, b.Bytes(), 0666)
+}
+
+func (e *updateFailed) consoleURL() string {
+	return "https://console.aws.amazon.com/go/view?arn=" + url.QueryEscape(e.stackARN)
 }
 
 // oneLine collapses runs of whitespace (including newlines) into single spaces
 // so a reason renders on a single log line or table cell.
-func oneLine(s string) string { return strings.Join(strings.Fields(s), " ") }
+func oneLine(s string) string {
+	var prevIsSpace bool
+	f := func(r rune) rune {
+		if !unicode.IsSpace(r) {
+			prevIsSpace = false
+			return r
+		}
+		if prevIsSpace {
+			return -1
+		}
+		prevIsSpace = true
+		return ' '
+	}
+	return strings.TrimSpace(strings.Map(f, s))
+}
 
 // mdCell makes a reason safe to embed in a Markdown table cell.
 func mdCell(s string) string { return strings.ReplaceAll(oneLine(s), "|", "\\|") }
