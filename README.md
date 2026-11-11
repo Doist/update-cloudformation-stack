@@ -5,7 +5,7 @@ This GitHub Action updates existing CloudFormation stack by changing some of its
 ## Usage
 
 ```yaml
-- uses: doist/update-cloudformation-stack@main
+- uses: todoist/update-cloudformation-stack@main
   with:
     stack: my-stack-name
     parameters: |
@@ -49,7 +49,7 @@ jobs:
         with:
           role-to-assume: arn:aws:iam::123456789012:role/my-role
           aws-region: us-east-1
-      - uses: doist/update-cloudformation-stack@main
+      - uses: todoist/update-cloudformation-stack@main
         with:
           stack: production-stack
           parameters: |
